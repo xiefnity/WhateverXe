@@ -26,6 +26,7 @@
 #include "kern_dsi_attributes.hpp"
 #include "kern_dsi_apple_timing.hpp"
 #include "kern_display13_firmware.hpp"
+#include "kern_display13_train_trace.hpp"
 #include "kern_display13_tc_aux.hpp"
 #include "kern_display13_tc_mode.hpp"
 #include "kern_display13_tc_lightup.hpp"
@@ -7220,6 +7221,7 @@ bool XE::processDisplay13FramebufferOutput(KernelPatcher &patcher,size_t index,m
     const bool complete=ready && comboReady && processDisplay13FramebufferColor(patcher,index,address,size) &&
         processDisplay13FramebufferSST(patcher,index,address,size) && processDisplay13FramebufferAUX(patcher,index,address,size);
     adlnComboPLLFractionCaller=complete ? address+0x6D973 : 0;
+    if(complete)display13TrainTraceInstall();
     return complete;
 }
 
@@ -7240,7 +7242,7 @@ bool XE::processDisplay13FramebufferAUX(KernelPatcher &patcher,size_t index,mach
  auto global=patcher.solveSymbol<mach_vm_address_t>(index,"_gController",address,size);patcher.clearError();
  if(global!=address+0x138BA8)return false;
  KernelPatcher::RouteRequest routes[]={
-  {names[0],wrapDisplay13ReadAUX,orgDisplay13ReadAUX},{names[1],wrapDisplay13WriteAUX,orgDisplay13WriteAUX},
+  {names[0],traceDisplay13ReadAUX,orgDisplay13ReadAUX},{names[1],traceDisplay13WriteAUX,orgDisplay13WriteAUX},
   {names[2],wrapDisplay13I2CAUX,orgDisplay13I2CAUX},{names[3],wrapDisplay13RunAUX,orgDisplay13RunAUX}
  };
  display13FBAUXHooksReady=patcher.routeMultiple(index,routes,arrsize(routes),address,size);patcher.clearError();
@@ -7367,7 +7369,7 @@ bool XE::processDisplay13Training(KernelPatcher &patcher,size_t index,mach_vm_ad
  const auto &e=entries[PortTrain];
  const auto fn=patcher.solveSymbol<mach_vm_address_t>(index,e.symbol,address,size);patcher.clearError();
  if(fn!=address+e.offset || memcmp(reinterpret_cast<void *>(fn),e.prefix,sizeof(e.prefix)))return false;
- KernelPatcher::RouteRequest route(e.symbol,wrapDisplay13PortTraining,orgDisplay13PortTraining);
+ KernelPatcher::RouteRequest route(e.symbol,traceDisplay13PortTraining,orgDisplay13PortTraining);
  const bool routed=patcher.routeMultipleShort(index,&route,1,address,size);patcher.clearError();
  if(!routed)return false;
  trainingLeaseDP13Mask=adlnOutputWiring.links();
@@ -7533,9 +7535,9 @@ bool XE::processDisplay13FramebufferSST(KernelPatcher &patcher,size_t index,mach
     memcmp(reinterpret_cast<void *>(address+0x61468),lanesABI,sizeof(lanesABI)) ||
     memcmp(reinterpret_cast<void *>(address+0x61478),successABI,sizeof(successABI)))return false;
  KernelPatcher::RouteRequest routes[] {
-  {pattern,wrapDisplay13TrainingPattern,orgDisplay13TrainingPattern},
-  {signal,wrapDisplay13SignalLevels,orgDisplay13SignalLevels},
-  {enable,wrapDisplay13EnablePort,orgDisplay13EnablePort},
+  {pattern,traceDisplay13TrainingPattern,orgDisplay13TrainingPattern},
+  {signal,traceDisplay13SignalLevels,orgDisplay13SignalLevels},
+  {enable,traceDisplay13EnablePort,orgDisplay13EnablePort},
   {disable,wrapDisplay13DisablePort,orgDisplay13DisablePort}
  };
  display13FBSSTHooksReady=patcher.routeMultiple(index,routes,arrsize(routes),address,size);patcher.clearError();
@@ -7686,6 +7688,183 @@ uint32_t XE::wrapDisplay13TrainingPattern(void *path,uint32_t pattern) {
  const auto result=FunctionCast(wrapDisplay13TrainingPattern,s->orgDisplay13TrainingPattern)(path,pattern);
  if(result || pattern>5)return result;
  return program(false)?0:kIOReturnNotReady;
+}
+// Training observation. These outer routes call the unchanged wrappers and return
+// their results verbatim. Registers are read only, and only under the same power
+// proof the wrappers use. Publication happens through a serializer, not here.
+static IOSimpleLock *display13TrainTraceLock;
+static Display13TrainTrace::Ring display13TrainTraceRing;
+static uint32_t display13TrainTraceAttempt;
+static uintptr_t display13TrainTraceThread;
+static uint64_t display13TrainTraceNow() {
+ uint64_t uptime,ns;clock_get_uptime(&uptime);absolutetime_to_nanoseconds(uptime,&ns);return ns;
+}
+static bool display13TrainTraceInside() {
+ return __atomic_load_n(&display13TrainTraceThread,__ATOMIC_ACQUIRE)==reinterpret_cast<uintptr_t>(current_thread());
+}
+static void display13TrainTraceEmit(Display13TrainTrace::Record &r,uint32_t kind) {
+ if(!display13TrainTraceLock)return;
+ r.ns=display13TrainTraceNow();r.thread=reinterpret_cast<uintptr_t>(current_thread());
+ r.word[1]=kind;r.word[2]=__atomic_load_n(&display13TrainTraceAttempt,__ATOMIC_ACQUIRE);
+ const bool inside=display13TrainTraceInside();
+ IOSimpleLockLock(display13TrainTraceLock);display13TrainTraceRing.push(r,inside);IOSimpleLockUnlock(display13TrainTraceLock);
+}
+// ref 0: records retained from the start. ref 1: most recent records. Header:
+// schema, count, stored, dropped, first capacity, last capacity, record size, ref.
+static bool display13TrainTraceSerialize(void *,void *ref,OSSerialize *serializer) {
+ using namespace Display13TrainTrace;
+ if(!display13TrainTraceLock)return false;
+ const bool latest=ref!=nullptr;
+ const size_t capacity=latest?sizeof(display13TrainTraceRing.last):sizeof(display13TrainTraceRing.first);
+ const size_t size=32+capacity;
+ auto copy=static_cast<uint8_t *>(IOMalloc(size));if(!copy)return false;
+ auto header=reinterpret_cast<uint32_t *>(copy);
+ IOSimpleLockLock(display13TrainTraceLock);
+ header[0]=Schema;header[1]=display13TrainTraceRing.count;header[2]=display13TrainTraceRing.stored;
+ header[3]=display13TrainTraceRing.dropped;
+ memcpy(copy+32,latest?display13TrainTraceRing.last:display13TrainTraceRing.first,capacity);
+ IOSimpleLockUnlock(display13TrainTraceLock);
+ header[4]=FirstCapacity;header[5]=LastCapacity;header[6]=sizeof(Record);header[7]=latest;
+ auto data=OSData::withBytes(copy,uint32_t(size));IOFree(copy,size);if(!data)return false;
+ const bool result=data->serialize(serializer);data->release();return result;
+}
+void XE::display13TrainTraceInstall() {
+ if(!display13TrainTraceLock)display13TrainTraceLock=IOSimpleLockAlloc();
+ auto root=IORegistryEntry::getRegistryRoot();
+ root->setProperty("WEXDisplay13TrainTraceReady",display13TrainTraceLock!=nullptr);
+ if(!display13TrainTraceLock)return;
+ if(auto first=OSSerializer::forTarget(nullptr,display13TrainTraceSerialize,nullptr)) {
+  root->setProperty("WEXDisplay13TrainTraceFirst",first);first->release();
+ }
+ if(auto last=OSSerializer::forTarget(nullptr,display13TrainTraceSerialize,reinterpret_cast<void *>(1))) {
+  root->setProperty("WEXDisplay13TrainTraceLast",last);last->release();
+ }
+}
+static uint32_t display13TrainTraceDDI(void *port) {
+ auto object=static_cast<OSObject *>(port);
+ return object && object->getMetaClass()->getClassSize()>=0x624 ? Display13FBMemory::field<uint32_t>(port,0x120):UINT32_MAX;
+}
+// Caller holds the display owner lock.
+static uint32_t display13TrainTraceFaults() {
+ auto &c=display13FBPower;
+ return (c.clockFaulted?1U:0)|(c.memoryFaulted?2U:0)|(c.panelFaulted?4U:0)|(c.clockStopped?8U:0)|(c.bridge.state.faulted?16U:0);
+}
+static void display13TrainTraceAUX(void *port,uint32_t address,void *data,uint32_t length,bool write,uint32_t result,uint64_t start,uintptr_t caller,mach_vm_address_t image) {
+ Display13TrainTrace::Record r {};auto w=r.word;
+ w[3]=address;w[4]=length;w[5]=write;w[6]=result;w[7]=display13TrainTraceDDI(port);
+ w[8]=image && caller>=image && caller-image<0x200000 ? uint32_t(caller-image):UINT32_MAX;
+ if(data && (write || !result)) {w[9]=length<16?length:16;memcpy(w+11,data,w[9]);}
+ w[10]=uint32_t(display13TrainTraceNow()-start);w[15]=display13TrainTraceInside();
+ display13TrainTraceEmit(r,Display13TrainTrace::AUX);
+}
+uint32_t XE::traceDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_t length) {
+ if(!Display13TrainTrace::interesting(address))return wrapDisplay13ReadAUX(port,address,data,length);
+ const auto caller=reinterpret_cast<uintptr_t>(__builtin_return_address(0));const auto start=display13TrainTraceNow();
+ const auto result=wrapDisplay13ReadAUX(port,address,data,length);
+ display13TrainTraceAUX(port,address,data,length,false,result,start,caller,callbackXE->display13DPImage);return result;
+}
+uint32_t XE::traceDisplay13WriteAUX(void *port,uint32_t address,void *data,uint32_t length) {
+ if(!Display13TrainTrace::interesting(address))return wrapDisplay13WriteAUX(port,address,data,length);
+ const auto caller=reinterpret_cast<uintptr_t>(__builtin_return_address(0));const auto start=display13TrainTraceNow();
+ const auto result=wrapDisplay13WriteAUX(port,address,data,length);
+ display13TrainTraceAUX(port,address,data,length,true,result,start,caller,callbackXE->display13DPImage);return result;
+}
+uint32_t XE::traceDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphasis,void *overrideConfig) {
+ const auto result=wrapDisplay13SignalLevels(port,swing,emphasis,overrideConfig);
+ auto s=callbackXE;auto &c=display13FBPower;const auto ddi=display13TrainTraceDDI(port);
+ if(!c.lock || ddi>=2 || display13HDMIPort(port))return result;
+ Display13TrainTrace::Record r {};auto w=r.word;
+ IOLockLock(c.lock);auto p=display13SSTPort(port);uint32_t flags=overrideConfig?2U:0;
+ if(p) {
+  flags|=1;TGLComboSignal selected;Display13FBPowerIO io{c.map};
+  if(selected.selectADLP(ddi,Display13FBMemory::field<uint32_t>(p,0x124),Display13FBMemory::field<uint32_t>(p,0x128),swing,emphasis,(s->adlnOutputWiring.panel&(1U<<ddi))!=0,s->firmwarePorts.panel.lowSwing)) {
+   flags|=4;w[5]=selected.level|(selected.swing<<8)|(selected.scalar<<16);
+  }
+  if(c.bridge.ddiHeld(io,ddi)) {
+   flags|=8;Display13FBSSTIO registers{c.map};const uint32_t base=ddi?0x6C000:0x162000;
+   w[6]=registers.read(base+0x894);w[7]=registers.read(base+0x28);
+   for(unsigned n=0;n<4;++n) {
+    w[8+n]=(registers.read(base+0x888+0x100*n)&0xFFFF)|(((registers.read(base+0x89C+0x100*n)>>24)&0x7F)<<16);
+    w[12+n]=registers.read(base+0x890+0x100*n);
+   }
+  }
+ }
+ w[3]=swing|(emphasis<<8)|(flags<<16)|(display13TrainTraceFaults()<<24);w[4]=result;
+ IOLockUnlock(c.lock);
+ display13TrainTraceEmit(r,Display13TrainTrace::Signal);return result;
+}
+uint32_t XE::traceDisplay13TrainingPattern(void *path,uint32_t pattern) {
+ const auto result=wrapDisplay13TrainingPattern(path,pattern);
+ auto s=callbackXE;auto &c=display13FBPower;auto object=static_cast<OSObject *>(path);
+ if(!s->adlnOutputWiring.links() || !c.lock || !object || object->getMetaClass()->getClassSize()<0x3730)return result;
+ auto port=Display13FBMemory::field<void *>(path,0x3648);
+ if(display13HDMIPort(port))return result;
+ const auto ddi=display13TrainTraceDDI(port);if(ddi>=2)return result;
+ const auto pipe=Display13FBMemory::field<uint32_t>(path,0x3640);
+ Display13TrainTrace::Record r {};auto w=r.word;
+ IOLockLock(c.lock);auto p=display13SSTPort(port);uint32_t flags=p?1U:0;
+ Display13FBPowerIO io{c.map};
+ if(p && pipe<3 && c.bridge.outputHeld(io,ddi,pipe)) {
+  flags|=2;Display13FBSSTIO registers{c.map};
+  w[5]=registers.read(0x60540+0x1000*pipe);w[6]=registers.read(0x60400+0x1000*pipe);
+  w[7]=registers.read(0x46140+4*pipe);w[8]=registers.read(0x64000+0x100*ddi);
+ }
+ w[3]=pattern|(flags<<8)|(display13TrainTraceFaults()<<16);w[4]=result;w[9]=pipe;w[10]=ddi;
+ IOLockUnlock(c.lock);
+ display13TrainTraceEmit(r,Display13TrainTrace::Pattern);return result;
+}
+uint32_t XE::traceDisplay13EnablePort(void *port) {
+ const auto result=wrapDisplay13EnablePort(port);
+ auto s=callbackXE;auto &c=display13FBPower;const auto ddi=display13TrainTraceDDI(port);
+ if(!s->adlnOutputWiring.links() || !c.lock || ddi>=2 || display13HDMIPort(port))return result;
+ Display13TrainTrace::Record r {};auto w=r.word;
+ IOLockLock(c.lock);auto p=display13SSTPort(port);uint32_t flags=p?1U:0;
+ Display13FBPowerIO io{c.map};
+ if(p && c.bridge.ddiHeld(io,ddi)) {
+  flags|=2;Display13FBSSTIO registers{c.map};w[5]=registers.read(0x64000+0x100*ddi);
+ }
+ w[3]=flags|(display13TrainTraceFaults()<<8);w[4]=result;w[6]=ddi;
+ IOLockUnlock(c.lock);
+ display13TrainTraceEmit(r,Display13TrainTrace::Enable);return result;
+}
+static void display13TrainTraceFields(Display13TrainTrace::Record &r,const uint8_t *p,uint32_t ddi,bool request) {
+ auto w=r.word;
+ w[3]=*reinterpret_cast<const uint32_t *>(p+0x128);w[4]=*reinterpret_cast<const uint32_t *>(p+0x124);
+ w[5]=p[0x0F]|(p[0x11]<<8)|(p[0x10]<<16)|(uint32_t(p[0x12])<<24);
+ w[6]=p[0x14]|(p[0xF9]<<8)|(p[0xFA]<<16)|(uint32_t(p[0xFB])<<24);
+ w[7]=p[0x115]|(p[0x116]<<8)|(p[0x117]<<16)|(uint32_t(p[0x118])<<24);
+ w[8]=p[0x119]|(p[0x11A]<<8)|(p[0x11B]<<16);
+ w[9]=*reinterpret_cast<const uint32_t *>(p+0x12C);w[10]=*reinterpret_cast<const uint32_t *>(p+0x130);
+ w[11]=*reinterpret_cast<const uint32_t *>(p+0x550);w[14]=ddi;w[15]=request;
+}
+void XE::display13TrainTraceRegisters(void *port,uint32_t ddi,uint32_t phase) {
+ auto &c=display13FBPower;Display13TrainTrace::Record r {};auto w=r.word;
+ IOLockLock(c.lock);auto p=display13SSTPort(port);Display13FBPowerIO io{c.map};
+ w[3]=phase;w[4]=ddi;
+ if(p && c.bridge.ddiHeld(io,ddi)) {
+  w[5]=1;Display13FBSSTIO registers{c.map};
+  w[6]=registers.read(0x164280);w[7]=registers.read(0x46010);w[8]=registers.read(0x164284);w[9]=registers.read(0x164288);
+  w[10]=registers.read(0x46014);w[11]=registers.read(0x16428C);w[12]=registers.read(0x164290);
+  w[13]=registers.read(0x64000+0x100*ddi);w[14]=registers.read(0xC7200);w[15]=registers.read(0xC7204);
+ }
+ IOLockUnlock(c.lock);
+ display13TrainTraceEmit(r,Display13TrainTrace::Regs);
+}
+uint32_t XE::traceDisplay13PortTraining(void *port,void *request) {
+ const auto ddi=display13TrainTraceDDI(port);
+ if(!display13FBPower.lock || !display13TrainTraceLock || ddi>=2 || display13HDMIPort(port))return wrapDisplay13PortTraining(port,request);
+ auto p=static_cast<const uint8_t *>(port);
+ __atomic_add_fetch(&display13TrainTraceAttempt,1,__ATOMIC_ACQ_REL);
+ __atomic_store_n(&display13TrainTraceThread,reinterpret_cast<uintptr_t>(current_thread()),__ATOMIC_RELEASE);
+ Display13TrainTrace::Record begin {};display13TrainTraceFields(begin,p,ddi,request!=nullptr);
+ display13TrainTraceEmit(begin,Display13TrainTrace::Begin);
+ display13TrainTraceRegisters(port,ddi,0);
+ const auto result=wrapDisplay13PortTraining(port,request);
+ display13TrainTraceRegisters(port,ddi,1);
+ Display13TrainTrace::Record end {};display13TrainTraceFields(end,p,ddi,request!=nullptr);end.word[12]=result;
+ display13TrainTraceEmit(end,Display13TrainTrace::End);
+ __atomic_store_n(&display13TrainTraceThread,0,__ATOMIC_RELEASE);
+ return result;
 }
 uint32_t XE::wrapDisplay13GMBus(IOService *controller,uint32_t bus,uint32_t speed,void *request) {
     // Extending the donor's pin bound is not permission to use an arbitrary

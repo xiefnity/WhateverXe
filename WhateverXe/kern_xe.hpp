@@ -219,6 +219,14 @@ private:
  static bool display13HDMIPort(void *port);
  static uint32_t wrapDisplay13TrainingPattern(void *path,uint32_t pattern);
  static uint32_t wrapDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphasis,void *overrideConfig);
+ static void display13TrainTraceInstall();
+ static void display13TrainTraceRegisters(void *port,uint32_t ddi,uint32_t phase);
+ static uint32_t traceDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_t length);
+ static uint32_t traceDisplay13WriteAUX(void *port,uint32_t address,void *data,uint32_t length);
+ static uint32_t traceDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphasis,void *overrideConfig);
+ static uint32_t traceDisplay13TrainingPattern(void *path,uint32_t pattern);
+ static uint32_t traceDisplay13EnablePort(void *port);
+ static uint32_t traceDisplay13PortTraining(void *port,void *request);
 	mach_vm_address_t xelpProviderProbe {},xelpProviderConfigureProbe {};
  bool display13DPAltProbeReady {},display13DPProbeReady {},display13TCProbeReady {},display13TCDPProbeReady {},display13FBDPHooksReady {};
  bool adlpDisplaySelected {};
