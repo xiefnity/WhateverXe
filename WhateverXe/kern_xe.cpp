@@ -7935,7 +7935,7 @@ static void display13TrainTraceWriter(void *,wait_result_t) {
  using namespace Display13TrainTrace;
  const size_t size=32+sizeof(display13TrainTraceRing.first);
  auto copy=static_cast<uint8_t *>(IOMalloc(size));if(!copy)return;
- uint32_t written[2]={UINT32_MAX,UINT32_MAX};uint64_t id=0;
+ uint32_t written[3]={UINT32_MAX,UINT32_MAX,UINT32_MAX};uint64_t id=0;
  char path[96],text[192];
  for(unsigned tick=0;tick<120;++tick) {
   IOSleep(15000);
@@ -7951,8 +7951,8 @@ static void display13TrainTraceWriter(void *,wait_result_t) {
   if(c.lock){IOLockLock(c.lock);faults=display13TrainTraceFaults();line=c.firstFaultLine;IOLockUnlock(c.lock);}
   const int length=snprintf(text,sizeof(text),"attempts=%u heldRung=%u lastResult=0x%x records=%u faults=0x%x firstFaultLine=%u\n",
    __atomic_load_n(&display13TrainTraceAttempt,__ATOMIC_ACQUIRE),display13TrainLadderHeld,display13TrainTraceLastResult,header[1],faults,line);
-  const char *const roots[2]={"/private/var/log/wex","/Volumes/WEXTEST/wex-auto/wex"};
-  for(unsigned n=0;n<2;++n) {
+  const char *const roots[3]={"/private/var/log/wex","/Volumes/WEXTEST/wex-auto/wex","/Volumes/TAHOE/wex-auto/wex"};
+  for(unsigned n=0;n<3;++n) {
    if(written[n]==header[1])continue;
    snprintf(path,sizeof(path),"%s-trace-%llx.bin",roots[n],id);
    if(FileIO::writeBufferToFile(path,copy,size))continue;
