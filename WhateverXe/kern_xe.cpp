@@ -9152,7 +9152,7 @@ void XE::adlnSetDualClock(IOService *controller,uint64_t nativeHz) {
             evidence[7]=reinterpret_cast<bool (*)(const IOWorkLoop *)>(callbackXE->adlnWorkLoopInGate)(loop);
             if(!evidence[7]) {
                 ready=reinterpret_cast<bool (*)(IOWorkLoop *)>(callbackXE->adlnWorkLoopTryClose)(loop);
-                if(ready) {acquired=loop;evidence[8]=1;}
+                if(ready) {acquired=loop;evidence[8]=1;} else if(!active) {ready=true;evidence[8]=2;} // WEX issue #35 fix 3: cold CDCLK start, no active pipe
             }
         }
         if(ready)for(unsigned p=0;p<3;++p)if(active&(1U<<p)) {
