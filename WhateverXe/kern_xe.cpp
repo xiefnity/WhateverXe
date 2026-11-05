@@ -7816,8 +7816,23 @@ uint32_t XE::traceDisplay13TrainingPattern(void *path,uint32_t pattern) {
  IOLockUnlock(c.lock);
  display13TrainTraceEmit(r,Display13TrainTrace::Pattern);return result;
 }
+static uint32_t display13TrainLadderRung,display13TrainLadderHeld;
+static bool display13TrainLadderRearmed,display13TrainLadderCycled;
+static void display13TrainLadderStep(uint32_t step,uint32_t result,uint32_t rung) {
+ Display13TrainTrace::Record r {};r.word[3]=step;r.word[4]=result;r.word[5]=rung;
+ display13TrainTraceEmit(r,Display13TrainTrace::Step);
+}
 uint32_t XE::traceDisplay13EnablePort(void *port) {
  const auto result=wrapDisplay13EnablePort(port);
+ // Linux starts TPS1 before it writes TRAINING_PATTERN_SET; the donor writes it first.
+ if(!result && display13TrainTraceInside() && !display13TrainLadderRearmed &&
+    display13TrainLadderRung>=Display13TrainTrace::RearmPattern) {
+  display13TrainLadderRearmed=true;
+  uint8_t off=0,set[5]={0x21,0,0,0,0};
+  const auto a=traceDisplay13WriteAUX(port,0x102,&off,1);
+  const auto b=traceDisplay13WriteAUX(port,0x102,set,sizeof(set));
+  display13TrainLadderStep(3,a?a:b,display13TrainLadderRung);
+ }
  auto s=callbackXE;auto &c=display13FBPower;const auto ddi=display13TrainTraceDDI(port);
  if(!s->adlnOutputWiring.links() || !c.lock || ddi>=2 || display13HDMIPort(port))return result;
  Display13TrainTrace::Record r {};auto w=r.word;
@@ -7853,6 +7868,32 @@ void XE::display13TrainTraceRegisters(void *port,uint32_t ddi,uint32_t phase) {
  IOLockUnlock(c.lock);
  display13TrainTraceEmit(r,Display13TrainTrace::Regs);
 }
+// Experimental: steps of the working Linux path that the donor omits, DDI A/B panel only.
+void XE::display13TrainLadderPrepare(void *port,uint32_t ddi,uint32_t rung) {
+ auto s=callbackXE;auto &c=display13FBPower;
+ IOLockLock(c.lock);auto p=display13SSTPort(port);
+ const bool panel=p && (s->adlnOutputWiring.panel&(1U<<ddi));auto controller=c.controller;
+ if(panel && rung>=Display13TrainTrace::AssrOff)p[0x118]=0;
+ IOLockUnlock(c.lock);
+ if(!panel)return;
+ if(rung>=Display13TrainTrace::AssrOff)display13TrainLadderStep(4,0,rung);
+ if(rung>=Display13TrainTrace::PanelPowerCycle && !display13TrainLadderCycled) {
+  display13TrainLadderCycled=true;
+  const auto off=wrapDisplay13PanelPower(controller,0);
+  display13TrainLadderStep(6,off,rung);display13TrainTraceRegisters(port,ddi,2);
+  const auto on=wrapDisplay13PanelPower(controller,2);
+  display13TrainLadderStep(7,on,rung);display13TrainTraceRegisters(port,ddi,3);
+ }
+ if(rung>=Display13TrainTrace::PowerStateCycle) {
+  uint8_t d3=2;const auto r=traceDisplay13WriteAUX(port,0x600,&d3,1);
+  IOSleep(2);display13TrainLadderStep(5,r,rung);
+ }
+ uint8_t d0=1,coding=1;
+ const auto a=traceDisplay13WriteAUX(port,0x600,&d0,1);
+ IOSleep(1);
+ display13TrainLadderStep(1,a,rung);
+ display13TrainLadderStep(2,traceDisplay13WriteAUX(port,0x108,&coding,1),rung);
+}
 // Linux control differs from the donor in these sink fields; read them before each attempt.
 void XE::display13TrainTraceSinkState(void *port) {
  const struct {uint32_t address,length;} fields[]={{0x600,1},{0x107,2},{0x10A,1},{0x170,1},{0x2008,3}};
@@ -7864,13 +7905,17 @@ uint32_t XE::traceDisplay13PortTraining(void *port,void *request) {
  auto p=static_cast<const uint8_t *>(port);
  __atomic_add_fetch(&display13TrainTraceAttempt,1,__ATOMIC_ACQ_REL);
  __atomic_store_n(&display13TrainTraceThread,reinterpret_cast<uintptr_t>(current_thread()),__ATOMIC_RELEASE);
- Display13TrainTrace::Record begin {};display13TrainTraceFields(begin,p,ddi,request!=nullptr);
+ const auto rung=Display13TrainTrace::rung(__atomic_load_n(&display13TrainTraceAttempt,__ATOMIC_ACQUIRE),display13TrainLadderHeld);
+ display13TrainLadderRung=rung;display13TrainLadderRearmed=false;
+ Display13TrainTrace::Record begin {};display13TrainTraceFields(begin,p,ddi,request!=nullptr);begin.word[13]=rung;
  display13TrainTraceEmit(begin,Display13TrainTrace::Begin);
  display13TrainTraceRegisters(port,ddi,0);
  display13TrainTraceSinkState(port);
+ display13TrainLadderPrepare(port,ddi,rung);
  const auto result=wrapDisplay13PortTraining(port,request);
+ if(!result && !display13TrainLadderHeld)display13TrainLadderHeld=rung;
  display13TrainTraceRegisters(port,ddi,1);
- Display13TrainTrace::Record end {};display13TrainTraceFields(end,p,ddi,request!=nullptr);end.word[12]=result;
+ Display13TrainTrace::Record end {};display13TrainTraceFields(end,p,ddi,request!=nullptr);end.word[12]=result;end.word[13]=rung;
  display13TrainTraceEmit(end,Display13TrainTrace::End);
  __atomic_store_n(&display13TrainTraceThread,0,__ATOMIC_RELEASE);
  return result;

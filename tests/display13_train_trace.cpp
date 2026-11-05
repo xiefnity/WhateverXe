@@ -7,6 +7,8 @@ int main() {
     assert(interesting(0) && interesting(0x202) && interesting(0x220) && interesting(0x600));
     assert(interesting(0x700) && interesting(0x2210) && interesting(0x2008));
     assert(!interesting(0x221) && !interesting(0x68000) && !interesting(0x1000));
+    assert(rung(0,0)==SinkState && rung(1,0)==SinkState && rung(2,0)==RearmPattern);
+    assert(rung(5,0)==PanelPowerCycle && rung(9,0)==PanelPowerCycle && rung(9,RearmPattern)==RearmPattern);
     Record r {};
     for(uint32_t n=0;n<OutsideLimit;++n)assert(ring.push(r,false));
     assert(!ring.push(r,false) && ring.dropped==1 && ring.count==OutsideLimit);

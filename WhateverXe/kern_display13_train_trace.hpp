@@ -13,6 +13,13 @@ inline bool interesting(uint32_t address) {
     return address<=0x220 || address==0x600 || (address>=0x700 && address<=0x7FF) ||
         (address>=0x2200 && address<=0x22FF) || (address>=0x2000 && address<=0x2010);
 }
+// Experimental ladder: each attempt adds one step the working Linux path performs.
+// A rung that trains is held, so a later modeset does not move past what worked.
+enum Rung : uint32_t {SinkState=1,RearmPattern=2,AssrOff=3,PowerStateCycle=4,PanelPowerCycle=5};
+inline uint32_t rung(uint32_t attempt,uint32_t held) {
+    if(held)return held;
+    return attempt<1?uint32_t(SinkState):attempt>PanelPowerCycle?uint32_t(PanelPowerCycle):attempt;
+}
 struct Ring {
     Record first[FirstCapacity];
     Record last[LastCapacity];
