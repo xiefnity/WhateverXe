@@ -7731,6 +7731,7 @@ static bool display13TrainTraceSerialize(void *,void *ref,OSSerialize *serialize
  auto data=OSData::withBytes(copy,uint32_t(size));IOFree(copy,size);if(!data)return false;
  const bool result=data->serialize(serializer);data->release();return result;
 }
+static void display13TrainTraceWriter(void *,wait_result_t);
 void XE::display13TrainTraceInstall() {
  if(!display13TrainTraceLock)display13TrainTraceLock=IOSimpleLockAlloc();
  auto root=IORegistryEntry::getRegistryRoot();
@@ -7742,6 +7743,8 @@ void XE::display13TrainTraceInstall() {
  if(auto last=OSSerializer::forTarget(nullptr,display13TrainTraceSerialize,reinterpret_cast<void *>(1))) {
   root->setProperty("WEXDisplay13TrainTraceLast",last);last->release();
  }
+ thread_t writer=nullptr;
+ if(kernel_thread_start(display13TrainTraceWriter,nullptr,&writer)==KERN_SUCCESS)thread_deallocate(writer);
 }
 static uint32_t display13TrainTraceDDI(void *port) {
  auto object=static_cast<OSObject *>(port);
@@ -7903,6 +7906,7 @@ void XE::display13TrainTraceSinkState(void *port) {
  const struct {uint32_t address,length;} fields[]={{0x600,1},{0x107,2},{0x10A,1},{0x170,1},{0x2008,3}};
  for(const auto &f:fields) {uint8_t data[4] {};traceDisplay13ReadAUX(port,f.address,data,f.length);}
 }
+static uint32_t display13TrainTraceLastResult;
 uint32_t XE::traceDisplay13PortTraining(void *port,void *request) {
  const auto ddi=display13TrainTraceDDI(port);
  if(!display13FBPower.lock || !display13TrainTraceLock || ddi>=2 || display13HDMIPort(port))return wrapDisplay13PortTraining(port,request);
@@ -7920,9 +7924,44 @@ uint32_t XE::traceDisplay13PortTraining(void *port,void *request) {
  if(!result && !display13TrainLadderHeld)display13TrainLadderHeld=rung;
  display13TrainTraceRegisters(port,ddi,1);
  Display13TrainTrace::Record end {};display13TrainTraceFields(end,p,ddi,request!=nullptr);end.word[12]=result;end.word[13]=rung;
+ display13TrainTraceLastResult=result;
  display13TrainTraceEmit(end,Display13TrainTrace::End);
  __atomic_store_n(&display13TrainTraceThread,0,__ATOMIC_RELEASE);
  return result;
+}
+// Automatic capture: no SSH or login step. This thread holds no display lock, so a stalled
+// write can only stall itself. A missing volume is an ordinary open failure, retried.
+static void display13TrainTraceWriter(void *,wait_result_t) {
+ using namespace Display13TrainTrace;
+ const size_t size=32+sizeof(display13TrainTraceRing.first);
+ auto copy=static_cast<uint8_t *>(IOMalloc(size));if(!copy)return;
+ uint32_t written[2]={UINT32_MAX,UINT32_MAX};uint64_t id=0;
+ char path[96],text[192];
+ for(unsigned tick=0;tick<120;++tick) {
+  IOSleep(15000);
+  auto header=reinterpret_cast<uint32_t *>(copy);
+  IOSimpleLockLock(display13TrainTraceLock);
+  header[0]=Schema;header[1]=display13TrainTraceRing.count;header[2]=display13TrainTraceRing.stored;
+  header[3]=display13TrainTraceRing.dropped;
+  memcpy(copy+32,display13TrainTraceRing.first,sizeof(display13TrainTraceRing.first));
+  IOSimpleLockUnlock(display13TrainTraceLock);
+  header[4]=FirstCapacity;header[5]=LastCapacity;header[6]=sizeof(Record);header[7]=0;
+  if(!id)id=display13TrainTraceNow();
+  auto &c=display13FBPower;uint32_t faults=0,line=0;
+  if(c.lock){IOLockLock(c.lock);faults=display13TrainTraceFaults();line=c.firstFaultLine;IOLockUnlock(c.lock);}
+  const int length=snprintf(text,sizeof(text),"attempts=%u heldRung=%u lastResult=0x%x records=%u faults=0x%x firstFaultLine=%u\n",
+   __atomic_load_n(&display13TrainTraceAttempt,__ATOMIC_ACQUIRE),display13TrainLadderHeld,display13TrainTraceLastResult,header[1],faults,line);
+  const char *const roots[2]={"/private/var/log/wex","/Volumes/WEXTEST/wex-auto/wex"};
+  for(unsigned n=0;n<2;++n) {
+   if(written[n]==header[1])continue;
+   snprintf(path,sizeof(path),"%s-trace-%llx.bin",roots[n],id);
+   if(FileIO::writeBufferToFile(path,copy,size))continue;
+   snprintf(path,sizeof(path),"%s-status-%llx.txt",roots[n],id);
+   if(length>0)FileIO::writeBufferToFile(path,text,size_t(length));
+   written[n]=header[1];
+  }
+ }
+ IOFree(copy,size);
 }
 uint32_t XE::wrapDisplay13GMBus(IOService *controller,uint32_t bus,uint32_t speed,void *request) {
     // Extending the donor's pin bound is not permission to use an arbitrary
