@@ -7826,7 +7826,7 @@ uint32_t XE::traceDisplay13EnablePort(void *port) {
  const auto result=wrapDisplay13EnablePort(port);
  // Linux starts TPS1 before it writes TRAINING_PATTERN_SET; the donor writes it first.
  if(!result && display13TrainTraceInside() && !display13TrainLadderRearmed &&
-    display13TrainLadderRung>=Display13TrainTrace::RearmPattern) {
+    display13TrainLadderRung>=Display13TrainTrace::LinuxParity) {
   display13TrainLadderRearmed=true;
   uint8_t off=0,set[5]={0x21,0,0,0,0};
   const auto a=traceDisplay13WriteAUX(port,0x102,&off,1);
@@ -7873,10 +7873,14 @@ void XE::display13TrainLadderPrepare(void *port,uint32_t ddi,uint32_t rung) {
  auto s=callbackXE;auto &c=display13FBPower;
  IOLockLock(c.lock);auto p=display13SSTPort(port);
  const bool panel=p && (s->adlnOutputWiring.panel&(1U<<ddi));auto controller=c.controller;
- if(panel && rung>=Display13TrainTrace::AssrOff)p[0x118]=0;
+ // GOP and Linux leave ASSR off on this path. Linux uses TPS4 only from DPCD 1.4
+ // (drm_dp_tps4_supported); the donor checks the capability bit alone.
+ const bool noTPS4=panel && p[0x0C]<0x14 && p[0xFB];
+ if(panel) {p[0x118]=0;if(noTPS4)p[0xFB]=0;}
  IOLockUnlock(c.lock);
  if(!panel)return;
- if(rung>=Display13TrainTrace::AssrOff)display13TrainLadderStep(4,0,rung);
+ display13TrainLadderStep(4,0,rung);
+ if(noTPS4)display13TrainLadderStep(8,0,rung);
  if(rung>=Display13TrainTrace::PanelPowerCycle && !display13TrainLadderCycled) {
   display13TrainLadderCycled=true;
   const auto off=wrapDisplay13PanelPower(controller,0);
