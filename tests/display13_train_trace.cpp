@@ -5,7 +5,7 @@ using namespace Display13TrainTrace;
 static Ring ring;
 int main() {
     assert(interesting(0) && interesting(0x202) && interesting(0x220) && interesting(0x600));
-    assert(interesting(0x700) && interesting(0x2210));
+    assert(interesting(0x700) && interesting(0x2210) && interesting(0x2008));
     assert(!interesting(0x221) && !interesting(0x68000) && !interesting(0x1000));
     Record r {};
     for(uint32_t n=0;n<OutsideLimit;++n)assert(ring.push(r,false));

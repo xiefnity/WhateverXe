@@ -4,14 +4,14 @@
 #define KERN_DISPLAY13_TRAIN_TRACE_HPP
 #include <stdint.h>
 namespace Display13TrainTrace {
-enum Kind : uint32_t {AUX=1,Signal=2,Pattern=3,Enable=4,Begin=5,Regs=6,End=7};
+enum Kind : uint32_t {AUX=1,Signal=2,Pattern=3,Enable=4,Begin=5,Regs=6,End=7,Step=8};
 struct Record {uint64_t ns,thread;uint32_t word[16];};
 static_assert(sizeof(Record)==80,"Display13 training trace schema");
-constexpr uint32_t Schema=1,FirstCapacity=2048,LastCapacity=512,OutsideLimit=256;
+constexpr uint32_t Schema=2,FirstCapacity=2048,LastCapacity=512,OutsideLimit=256;
 // Capability, link and status DPCD ranges only. EDID, HDCP and sideband are excluded.
 inline bool interesting(uint32_t address) {
     return address<=0x220 || address==0x600 || (address>=0x700 && address<=0x7FF) ||
-        (address>=0x2200 && address<=0x22FF);
+        (address>=0x2200 && address<=0x22FF) || (address>=0x2000 && address<=0x2010);
 }
 struct Ring {
     Record first[FirstCapacity];

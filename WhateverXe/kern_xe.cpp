@@ -7853,6 +7853,11 @@ void XE::display13TrainTraceRegisters(void *port,uint32_t ddi,uint32_t phase) {
  IOLockUnlock(c.lock);
  display13TrainTraceEmit(r,Display13TrainTrace::Regs);
 }
+// Linux control differs from the donor in these sink fields; read them before each attempt.
+void XE::display13TrainTraceSinkState(void *port) {
+ const struct {uint32_t address,length;} fields[]={{0x600,1},{0x107,2},{0x10A,1},{0x170,1},{0x2008,3}};
+ for(const auto &f:fields) {uint8_t data[4] {};traceDisplay13ReadAUX(port,f.address,data,f.length);}
+}
 uint32_t XE::traceDisplay13PortTraining(void *port,void *request) {
  const auto ddi=display13TrainTraceDDI(port);
  if(!display13FBPower.lock || !display13TrainTraceLock || ddi>=2 || display13HDMIPort(port))return wrapDisplay13PortTraining(port,request);
@@ -7862,6 +7867,7 @@ uint32_t XE::traceDisplay13PortTraining(void *port,void *request) {
  Display13TrainTrace::Record begin {};display13TrainTraceFields(begin,p,ddi,request!=nullptr);
  display13TrainTraceEmit(begin,Display13TrainTrace::Begin);
  display13TrainTraceRegisters(port,ddi,0);
+ display13TrainTraceSinkState(port);
  const auto result=wrapDisplay13PortTraining(port,request);
  display13TrainTraceRegisters(port,ddi,1);
  Display13TrainTrace::Record end {};display13TrainTraceFields(end,p,ddi,request!=nullptr);end.word[12]=result;
