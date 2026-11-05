@@ -5497,7 +5497,10 @@ bool XE::processDisplay13Framebuffer(KernelPatcher &patcher,size_t index,mach_vm
 	display13FBLifecycleHooksReady=processDisplay13FramebufferLifecycle(patcher,index,address,size);
 	IORegistryEntry::getRegistryRoot()->setProperty("N97FBLifecycleHooksReady",display13FBLifecycleHooksReady);
 	display13FBOutputHooksReady=processDisplay13FramebufferOutput(patcher,index,address,size);
-    if(adlnOutputWiring.panel)processDisplay13Panel(patcher,index,address,size);
+    if(adlnOutputWiring.panel) {
+        processDisplay13Panel(patcher,index,address,size);
+        processDisplay13PanelDPCD(patcher,index,address,size);
+    }
     display13FBTCHooksReady=processDisplay13FramebufferTC(patcher,index,address,size);
     if(!(adlnOutputWiring.selected()&0x78) && adlnOutputWiring.panel)processDisplay13Training(patcher,index,address,size);
     IORegistryEntry::getRegistryRoot()->setProperty("WEXDisplay13TCHooksReady",display13FBTCHooksReady);
@@ -13385,6 +13388,19 @@ void XE::processDisplay13Panel(KernelPatcher &patcher,size_t index,mach_vm_addre
  KernelPatcher::RouteRequest route(symbol,wrapDisplay13PanelPower,orgDisplay13PanelPower);
  display13PanelPowerReady=patcher.routeMultipleShort(index,&route,1,address,size);
  patcher.clearError();
+}
+// Independent of panel readiness: a refused patch leaves the donor unchanged.
+void XE::processDisplay13PanelDPCD(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size) {
+ const auto &patch=Display13Panel::extendedCapsPatch;bool applied=false;
+ const auto info=patcher.solveSymbol<mach_vm_address_t>(index,"__ZN14AppleIntelPort11getDPCDInfoEv",address,size);patcher.clearError();
+ if(size>uint64_t(patch.offset)+patch.size && info==address+0x1DE0E &&
+    !memcmp(reinterpret_cast<void *>(address+patch.offset),patch.before,patch.size)) {
+  patcher.routeBlock(address+patch.offset,patch.after,patch.size);
+  applied=patcher.getError()==KernelPatcher::Error::NoError &&
+   !memcmp(reinterpret_cast<void *>(address+patch.offset),patch.after,patch.size);
+  patcher.clearError();
+ }
+ IORegistryEntry::getRegistryRoot()->setProperty("WEXDisplay13PanelBaseDPCD",applied);
 }
 // The caller holds c.lock. Only the retained controller/platform/map can own PPS0.
 bool XE::display13PanelTarget(void *controller) {

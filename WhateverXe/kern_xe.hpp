@@ -219,6 +219,7 @@ private:
  static bool display13HDMIPort(void *port);
  static uint32_t wrapDisplay13TrainingPattern(void *path,uint32_t pattern);
  static uint32_t wrapDisplay13SignalLevels(void *port,uint32_t swing,uint32_t emphasis,void *overrideConfig);
+ void processDisplay13PanelDPCD(KernelPatcher &patcher,size_t index,mach_vm_address_t address,size_t size);
  static void display13TrainTraceInstall();
  static void display13TrainTraceRegisters(void *port,uint32_t ddi,uint32_t phase);
  static uint32_t traceDisplay13ReadAUX(void *port,uint32_t address,void *data,uint32_t length);
